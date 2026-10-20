@@ -35,7 +35,7 @@ const resources = {
       description: '无法从服务端加载审计请求日志。',
       title: '请求失败',
     },
-    eyebrow: '工作台请求记录',
+    eyebrow: '服务端 API 请求记录',
     filters: {
       all: '所有日志',
       apiTypePlaceholder: 'API 类型',
@@ -296,6 +296,7 @@ const resources = {
     tagMode: '标签写入方式',
     'tagMode.replace': '替换',
     'tagMode.append': '追加',
+    'tagMode.clear': '清空',
     reason: '添加原因',
     'reason.placeholder': '为什么要添加这个资源？',
     instruction: '处理指令',
@@ -398,6 +399,8 @@ const resources = {
       },
     },
     filePreview: {
+      editFailed: '无法读取完整文件用于编辑。',
+      saveFailed: '文件保存失败。',
       directoryLevels: {
         abstractLabel: '摘要',
         overviewLabel: '概览',
@@ -456,6 +459,12 @@ const resources = {
     },
   },
   retrieval: {
+    modeDescriptions: {
+      find: '按语义查找相关上下文，适合单次问题。',
+      search: '按语义检索，可结合会话上下文查找相关内容。',
+      grep: '按文本或正则表达式匹配文件内容。',
+      glob: '按路径通配符查找文件，例如 **/*.md。',
+    },
     title: '检索',
     searchPlaceholder: '输入检索内容',
     placeholders: {
@@ -525,7 +534,7 @@ const resources = {
     detail: {
       score: '相关度',
       level: '层级',
-      openPlayground: '在工作台中打开',
+      openFilesystem: '在文件系统中打开',
       uri: 'URI',
       summary: '摘要',
       noSummary: '暂无可展示的摘要',

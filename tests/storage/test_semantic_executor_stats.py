@@ -11,7 +11,6 @@ from openviking.core.context import ContextLevel
 from openviking.server.identity import RequestContext, Role
 from openviking.service.task_queue_middleware import TaskWorkQueueMiddleware
 from openviking.service.task_work_index import (
-    TaskWorkIndex,
     TaskWorkRejected,
     bind_task_context,
     get_task_context,
@@ -100,7 +99,6 @@ class _FakeProcessor:
         overview,
         ctx=None,
         ingest_options=None,
-        creator_acl_grant=None,
     ):
         self.vectorized_dirs.append(uri)
 
@@ -113,7 +111,6 @@ class _FakeProcessor:
         ctx=None,
         use_summary=False,
         ingest_options=None,
-        creator_acl_grant=None,
         file_md5=None,
     ):
         if self.verify_streaming:
@@ -389,6 +386,34 @@ async def test_busy_parent_snapshot_preserves_changed_file_work(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_directory_listing_lock_conflict_propagates_for_retry(monkeypatch):
+    root_uri = "viking://resources"
+    changed = f"{root_uri}/cp-source-test.md"
+    fake_fs = _FakeVikingFS({})
+    fake_fs.ls = AsyncMock(side_effect=LockAcquisitionError("source write still locked"))
+    monkeypatch.setattr(
+        "openviking.storage.queuefs.semantic_executor.get_viking_fs", lambda: fake_fs
+    )
+    _patch_semantic_config(monkeypatch)
+
+    executor = SemanticTreeExecutor(
+        processor=_FakeProcessor(),
+        context_type="resource",
+        max_concurrent_llm=2,
+        ctx=RequestContext(user=UserIdentifier("acc1", "user1"), role=Role.USER),
+        incremental_update=True,
+        target_uri=root_uri,
+        recursive=False,
+        changes={"added": [changed]},
+        generation_trigger="content_write",
+        aggregate_directory=False,
+    )
+
+    with pytest.raises(LockAcquisitionError, match="source write still locked"):
+        await executor.run(root_uri)
+
+
+@pytest.mark.asyncio
 async def test_semantic_executor_shares_node_scheduler_across_roots(monkeypatch):
     root_a = "viking://resources/root-a"
     root_b = "viking://resources/root-b"
@@ -442,20 +467,11 @@ async def test_semantic_executor_shares_node_scheduler_across_roots(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_task_work_rejection_does_not_stop_shared_semantic_worker():
-    work_index = TaskWorkIndex()
-
-    async def finalize_before_ack(_metadata):
-        return None
-
-    work_index.set_callbacks(
-        finalize_before_ack=finalize_before_ack,
-        is_cancellation_requested=lambda _task_id: True,
-    )
     embedding_queue = NamedQueue(
         None,
         "/queue",
         "Embedding",
-        middlewares=[TaskWorkQueueMiddleware(work_index)],
+        middlewares=[TaskWorkQueueMiddleware()],
     )
     embedding_queue._initialized = True
     unrelated_ran = asyncio.Event()

@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from openviking.connector.auth import OAUTH_REF_ARG, project_auth_config
 from openviking.connector.client import ConnectorClient
 from openviking.connector.routing import (
     CONNECTOR_ARGS_AUTH_CONFIG_KEY,
@@ -38,6 +39,7 @@ from openviking.connector.routing import (
 from openviking.core.namespace import NamespaceShapeError
 from openviking.core.uri_validation import matches_content_kind
 from openviking.crypto.encryptor import MAGIC as ENCRYPTED_ENVELOPE_MAGIC
+from openviking.metrics.datasources.resource import ResourceIngestionEventDataSource
 from openviking.observability.http_error_context import (
     sanitize_public_error_details,
     sanitize_public_http_error,
@@ -566,6 +568,10 @@ class ConnectorDelegate:
                 str(key): str(value) for key, value in (declared_auth or {}).items() if value
             }
 
+        if add_type in {"meego", "feishu_project"} and OAUTH_REF_ARG in (connector_args or {}):
+            auth_config = await project_auth_config(connector_args or {}, ctx)
+            forwarded_args.pop(OAUTH_REF_ARG, None)
+
         tos_path: Optional[str] = None
         param_config: Optional[Dict[str, Any]] = None
         if add_type == "tos":
@@ -628,11 +634,15 @@ class ConnectorDelegate:
             account_id=ctx.account_id,
         )
         extra_params = None
-        if tags is not None:
-            extra_params = {
-                "tags": normalize_search_tags(tags),
-                "tag_mode": tag_mode,
-            }
+        if tag_mode == "clear":
+            extra_params = {"tag_mode": tag_mode}
+        elif tags is not None:
+            normalized_tags = normalize_search_tags(tags)
+            if normalized_tags:
+                extra_params = {
+                    "tags": normalized_tags,
+                    "tag_mode": tag_mode,
+                }
 
         task_tracker = get_task_tracker()
         task = await task_tracker.create(
@@ -674,6 +684,11 @@ class ConnectorDelegate:
                 raise InternalError(
                     f"Connector accepted the import but returned no task key: {result}"
                 )
+            ResourceIngestionEventDataSource.record_import(
+                pipeline="connector",
+                source_type="repository" if add_type == "git" else "document",
+                account_id=ctx.account_id,
+            )
             # Never log api_key / auth_config / param_config values here.
             logger.info(
                 "[ConnectorDelegate] Connector import accepted: add_type=%s to=%s "
@@ -875,7 +890,6 @@ class ConnectorDelegate:
                                 ctx=ctx,
                                 reason=reason,
                                 source_name=None,
-                                timeout=None,
                             )
                             for key in ("memory_linking", "warnings"):
                                 if key in link_result:

@@ -55,6 +55,7 @@ const LOADERS = {
   trae: { harness: "trae", load: (cwd) => loadAgentHookConfig("trae", cwd), options: { logFile: "trae-hooks.log" }, owns: [] },
   trae_cn: { harness: "trae-cn", load: (cwd) => loadAgentHookConfig("trae-cn", cwd), options: { logFile: "trae-cn-hooks.log" }, owns: [] },
   zcode: { harness: "zcode", load: (cwd) => loadAgentHookConfig("zcode", cwd), options: { logFile: "zcode-hooks.log" }, owns: [] },
+  kimicode: { harness: "kimicode", load: (cwd) => loadAgentHookConfig("kimicode", cwd), options: { logFile: "kimicode-hooks.log" }, owns: [] },
 };
 
 // openclaw declares its own settings in TypeScript and still resolves them
@@ -148,6 +149,21 @@ test("the table covers every harness that has a shared loader", () => {
 });
 
 for (const [key, entry] of Object.entries(LOADERS)) {
+  test(`${key} defaults WM injection/takeover off and preserves explicit opt-in`, () => {
+    for (const enabled of [undefined, false, true]) {
+      withFixture({ cli: { ...CONNECTION, plugin: { resumeArchiveInject: enabled, takeoverEnabled: enabled } } }, ({ otherDir }) => {
+        const loaded = entry.load(otherDir);
+        assert.equal(loaded.resumeArchiveInject, enabled ?? false);
+        assert.equal(loaded.takeoverEnabled, enabled ?? false);
+        process.env.OPENVIKING_RESUME_ARCHIVE_INJECT = "1";
+        process.env.OPENVIKING_TAKEOVER = "1";
+        const overridden = entry.load(otherDir);
+        assert.equal(overridden.resumeArchiveInject, true);
+        assert.equal(overridden.takeoverEnabled, true);
+      });
+    }
+  });
+
   test(`${key} answers what buildPluginConfig answers`, () => {
     for (const files of FIXTURES) {
       withFixture(files, ({ workspaceDir, otherDir }) => {
@@ -349,6 +365,20 @@ test("ovcli.conf's plugin section outranks ov.conf, under ovcli.conf's own key",
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("the skill catalog is on by default and its budget clamps to the declared range", () => {
+  withFixture({}, ({ otherDir }) => {
+    const defaults = buildPluginConfig("codex", { cwd: otherDir });
+    assert.equal(defaults.skillCatalog, true);
+    assert.equal(defaults.skillCatalogTokenBudget, 1200);
+
+    process.env.OPENVIKING_SKILL_CATALOG = "false";
+    process.env.OPENVIKING_SKILL_CATALOG_TOKEN_BUDGET = "999999";
+    const overridden = buildPluginConfig("codex", { cwd: otherDir });
+    assert.equal(overridden.skillCatalog, false);
+    assert.equal(overridden.skillCatalogTokenBudget, 20000);
+  });
 });
 
 for (const [name, loader] of Object.entries(LOADERS)) {

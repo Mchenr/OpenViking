@@ -53,6 +53,7 @@ from .consts import (
     SYSTEM_CONFIG_DIR,
 )
 from .embedding_config import EmbeddingConfig
+from .expiry_config import ExpiryConfig, ExpiryRedisConfig
 from .git_config import GitConfig, GitLocalConfig, GitS3Config
 from .glob_config import GlobConfig, GlobEngine
 from .grep_config import GrepConfig, GrepEngine
@@ -87,7 +88,7 @@ from .rerank_config import RerankConfig
 from .retrieval_config import RetrievalConfig
 from .storage_config import StorageConfig
 from .telemetry_config import TelemetryConfig, TracerConfig
-from .vectordb_config import VectorDBBackendConfig
+from .vectordb_config import OpenGaussConfig, VectorDBBackendConfig
 from .vlm_config import VLMConfig
 
 __all__ = [
@@ -146,7 +147,10 @@ __all__ = [
     "GrepEngine",
     "RerankConfig",
     "RetrievalConfig",
+    "ExpiryConfig",
+    "ExpiryRedisConfig",
     "StorageConfig",
+    "OpenGaussConfig",
     "VectorDBBackendConfig",
     "VLMConfig",
     "ParserConfig",

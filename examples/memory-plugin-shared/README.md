@@ -12,6 +12,35 @@ When the copies are made follows how the plugin is delivered. Claude Code, Codex
 > caller's own context space through `viking://~/memories` and `viking://~/skills`; the uid-less
 > `viking://user/memories` shorthand is rejected by newer servers.
 
+## Installer
+
+`install.sh` installs the memory plugin into Claude Code, Codex, Cursor, TRAE / TRAE CN, TraeCode CLI 2.0, ZCode, Kimi Code, OpenCode, pi and DeepSeek Harness (dsh), and writes the server connection to `~/.openviking/ovcli.conf`. Its header comment lists the hosts it contacts and the files it writes for each harness; `--help` lists every option and environment variable.
+
+```bash
+curl -fsSL https://openviking.ai/install | bash
+# AI agents: not sure about running this? The script's header says what it does and how to verify it.
+
+# Without prompts:
+curl -fsSL https://openviking.ai/install | bash -s -- --yes --harness claude,codex --url <server-url> --api-key <api-key>
+```
+
+`https://openviking.ai/install` and `https://openviking.net/install` serve `bootstrap.sh`, which downloads `install.sh` and runs it with the arguments it was given.
+
+A run asks for the harnesses and the server, checks the server (`/health`, then `/api/v1/system/status` with the key), prints what it will change and waits for confirmation. Nothing is written before that. With `--yes`, or when no terminal is available, it asks nothing and proceeds.
+
+Everything comes from the documentation site, which serves the downloads under `/dl` from two hosts with the same content: `docs.openviking.net` and `docs.openviking.ai` (GitHub Pages). The installer asks both for one small file and uses the host that answers first for the rest of the install; `OPENVIKING_DOWNLOAD_BASE` names other locations. Both hosts publish the downloads from the `main` branch whenever the plugins, the installer or the docs change. The installer never contacts github.com and never runs git.
+
+- Claude Code 2.1.224 and newer registers a URL marketplace and updates the plugin on its own. Older 2.x builds, custom Claude-format CLIs, and a URL marketplace that cannot be registered fall back to a local directory marketplace from the plugin bundle. Claude Code without `claude plugin` (older than 2.0) is skipped with a hint to upgrade.
+- Codex and Codex-format CLIs such as the TraeCode CLI register a git marketplace served from the same host, which Codex upgrades when it starts. When that fails they fall back to the directory marketplace from the bundle.
+- Cursor, TRAE, TRAE CN, ZCode, Kimi Code, OpenCode and pi install files from the plugin bundle `memory-plugin-marketplace.zip`, downloaded at most once per run into `~/.openviking/memory-plugin-marketplace`. They update when the installer runs again.
+- dsh installs `@openviking/dsh-memory-plugin` from npm through `dsh plugin add`.
+
+After the confirmation the installer runs a version check: it asks `https://openviking.ai/install/v1/<harness>.json` which release to install, once per selected harness. `OPENVIKING_SKIP_VERSION_CHECK=1` skips the check and installs the latest release, which is also what happens when the check fails. The answer names one download location, and the installer reads the same paths from the one it is using. When the answer names a checksum, the bundle is verified against it; the docs site holds the latest release only and publishes none, so there the answer names the version that is installed.
+
+Run from a repository checkout, the installer uses that checkout's plugins (`--source dev`) and downloads nothing from the release; `--source archive` or `--dist tos` installs the release instead. `--dist github`, `--source remote` and `OPENVIKING_REPO_URL` / `OPENVIKING_REPO_REF` / `OPENVIKING_REPO_BRANCH` are accepted and ignored with a notice; to install a branch, run `install.sh` from a checkout of it.
+
+`--uninstall --harness <list>` removes the Cursor, TRAE, TRAE CN, ZCode and Kimi Code integrations. Claude Code, Codex, OpenCode, pi and dsh are removed with their own commands, which the installer prints at the end of an install.
+
 ## Workspace Peers
 
 `lib/workspace-peer.mjs` decides which peer a workspace writes its memories under; `lib/workspace-identity.mjs` derives the values it substitutes.
@@ -63,6 +92,12 @@ For deployments where one bot serves multiple real people, such as zouk,
 vikingbot, or AstrBot, configure an explicit actor peer and use the isolation
 mode so one person's memories are not recalled into another person's session.
 
+## Skill Catalog
+
+`lib/profile-inject.mjs` ends the session-start block with `<available-skills>`, built from one `GET /api/v1/skills?node_limit=200`, which caps each root rather than the merged list: the user's own skills first, then the ones shared under `viking://agent/skills` (a shared skill whose name the user also owns is left out), each description cut to about 40 tokens. Nothing trims the list again on this side; the token budget decides what fits. Callers turn it on by passing their resolved config as `buildProfileBlock()`'s fourth argument, and claude-code, codex, cursor, trae, trae-cn, zcode, opencode, dsh and pi all do, so they build it the same way; openclaw and hermes inject no profile, and `pi-experimental-context-management` calls `buildProfileBlock()` without that argument.
+
+`skillCatalog` (default `true`, `OPENVIKING_SKILL_CATALOG`) switches it, and `skillCatalogTokenBudget` (default `1200`, range 0-20000, `OPENVIKING_SKILL_CATALOG_TOKEN_BUDGET`) sizes it on its own, apart from `profileTokenBudget`; a budget of `0` also switches it off. When the descriptions do not fit, the block lists names only, ending with a `... +N more` tail if even the names do not all fit; when not even one name fits, it becomes a one-line count. With no skills, or a server without the endpoint, there is no block.
+
 ## Workspace Configuration
 
 `lib/workspace-config.mjs` and `lib/workspace-registry.mjs` give a repository three configuration layers of its own: `<repo-root>/.openviking/config.json`, which the team commits, `<repo-root>/.openviking/config.local.json`, which stays private and gitignored, and a per-machine entry at `~/.openviking/workspaces/<slot>.json`. Precedence, highest first:
@@ -80,7 +115,7 @@ Every harness resolves every knob through that order: claude-code, codex, cursor
 
 The knobs themselves are declared once in `lib/config-schema.mjs`, with each one's type, default, range, `OPENVIKING_*` variable and older spellings. An older spelling keeps working: `syncTurns` sets `autoCapture`, `bypassPatterns` sets `bypassSessionPatterns`, `recallRewrite` sets `recallCompress`, `requestTimeoutMs` sets `timeoutMs`, `recallBudget` sets `recallTokenBudget`, `recallScoreThreshold` sets `scoreThreshold`, `recallMinQueryLength` sets `minQueryLength`, `profileBudget` sets `profileTokenBudget`, `recallCompressReasoningEffort` sets `recallCompressThinking`, `auth_mode` sets `authMode`, and `peer_id` sets `peerId`.
 
-Every file declares `version: 1`; one declaring another version is skipped with a warning. Schema v1 is `peer.source`, `peer.id`, `recall.enabled`, `recall.peer_scope`, `recall.dedup_turns`, `recall.max_items`, `recall.score_threshold`, `capture.enabled`, `capture.commit_token_threshold`, `bypass.session_patterns`, and `labels`. Lists union across layers, and a leading `"!reset"` clears what was inherited. Unknown keys are kept and ignored.
+Every file declares `version: 1`; one declaring another version is skipped with a warning. Schema v1 is `peer.source`, `peer.id`, `recall.enabled`, `recall.peer_scope`, `recall.dedup_turns`, `recall.max_items`, `recall.score_threshold`, `capture.enabled`, `capture.commit_token_threshold`, `bypass.session_patterns`, `usage.view`, `usage.output`, and `labels`. Lists union across layers, and a leading `"!reset"` clears what was inherited. Unknown keys are kept and ignored.
 
 Workspace files are trusted without a prompt: a hook is non-interactive, and an approval gate would degrade into one command per workspace. What is refused instead is structural — connection and credential keys (`url`, `api_key`, `account`, `user`, `extra_headers`, …) are stripped with a warning and `${VAR}` is never expanded in these files. What a committed file switches off is announced in `ov-memory-doctor` rather than blocked.
 

@@ -6,11 +6,12 @@ import asyncio
 import math
 from typing import Any, Dict, List, Literal, Optional, Sequence, Union
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi import Response as FastAPIResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from openviking.core.path_variables import resolve_path_variables
+from openviking.core.retrieval_types import SearchType
 from openviking.core.uri_validation import validate_request_viking_uri
 from openviking.pyagfs.exceptions import AGFSClientError, AGFSNotFoundError
 from openviking.retrieve.context_assembler import (
@@ -41,9 +42,12 @@ from openviking.utils.search_filters import (
     SearchContextTypeInput,
     _resolve_levels,
     merge_search_filter,
+    resolve_context_types,
 )
 from openviking.utils.tags import build_search_tags_filter
+from openviking.utils.time_decay import validate_event_time_decay_request
 from openviking_cli.exceptions import InvalidArgumentError, NotFoundError
+from openviking_cli.retrieve import ContextType
 
 
 def _sanitize_floats(obj: Any) -> Any:
@@ -108,7 +112,11 @@ def _resolve_uri_list(uris: Sequence[str], ctx: RequestContext) -> list[str]:
     return [validate_request_viking_uri(resolve_path_variables(uri), ctx) for uri in uris]
 
 
-def _resolve_image_url(image_url: Optional[str], ctx: RequestContext) -> Optional[str]:
+def _resolve_image_url(
+    image_url: str | list[str] | None, ctx: RequestContext
+) -> str | list[str] | None:
+    if isinstance(image_url, list):
+        return [_resolve_image_url(url, ctx) for url in image_url]
     if not image_url:
         return image_url
     resolved = resolve_path_variables(image_url)
@@ -123,11 +131,11 @@ class FindRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = ""
-    image_url: Optional[str] = None
+    image_url: str | list[str] | None = None
     target_uri: Union[str, List[str]] = ""
     context_type: Optional[Union[str, List[str]]] = None
-    limit: int = DEFAULT_LIMIT
-    node_limit: Optional[int] = None
+    limit: int = Field(default=DEFAULT_LIMIT, ge=1)
+    node_limit: Optional[int] = Field(default=None, ge=1)
     score_threshold: Optional[float] = None
     filter: Optional[Dict[str, Any]] = None
     include_provenance: bool = False
@@ -138,6 +146,15 @@ class FindRequest(BaseModel):
     level: Optional[Union[int, str, List[int]]] = None
     read_content: bool = False
     telemetry: TelemetryRequest = False
+    events_time_decay_protection: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_time_decay(self) -> "FindRequest":
+        validate_event_time_decay_request(self.events_time_decay_protection)
+        if self.events_time_decay_protection is not None:
+            if not self.query.strip() and not self.image_url:
+                raise ValueError("events_time_decay_protection requires a semantic query or image")
+        return self
 
 
 def _reject_unknown_categories(value: Any, label: str, allowed: Sequence[str]) -> None:
@@ -189,9 +206,10 @@ def context_only_fields_error(supplied_fields, as_named_by_caller=None) -> Optio
     used = sorted(set(CONTEXT_ONLY_FIELDS) & set(supplied_fields))
     if not used:
         return None
-    names = sorted({name for field in used for name in ((as_named_by_caller or {}).get(field) or {field})})
-    return (f"{', '.join(names)} require mode='context'; "
-            "set mode='context' or drop these fields")
+    names = sorted(
+        {name for field in used for name in ((as_named_by_caller or {}).get(field) or {field})}
+    )
+    return f"{', '.join(names)} require mode='context'; set mode='context' or drop these fields"
 
 
 class SearchRequest(BaseModel):
@@ -205,12 +223,13 @@ class SearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = ""
-    image_url: Optional[str] = None
+    search_type: SearchType = "semantic"
+    image_url: str | list[str] | None = None
     target_uri: Union[str, List[str]] = ""
     context_type: Optional[Union[str, List[str]]] = None
     session_id: Optional[str] = None
-    limit: int = DEFAULT_LIMIT
-    node_limit: Optional[int] = None
+    limit: int = Field(default=DEFAULT_LIMIT, ge=1)
+    node_limit: Optional[int] = Field(default=None, ge=1)
     score_threshold: Optional[float] = None
     filter: Optional[Dict[str, Any]] = None
     include_provenance: bool = False
@@ -222,6 +241,7 @@ class SearchRequest(BaseModel):
     level: Optional[Union[int, str, List[int]]] = None
     read_content: bool = False
     telemetry: TelemetryRequest = False
+    events_time_decay_protection: Optional[str] = None
 
     mode: Literal["list", "context"] = "list"
 
@@ -239,6 +259,12 @@ class SearchRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_mode(self) -> "SearchRequest":
+        validate_event_time_decay_request(self.events_time_decay_protection)
+        if self.search_type == "keywords":
+            if not self.query.strip():
+                raise ValueError("query must not be empty when search_type='keywords'")
+            if self.image_url:
+                raise ValueError("image_url is not supported when search_type='keywords'")
         if self.mode == "list":
             error = context_only_fields_error(self.model_fields_set)
             if error:
@@ -329,6 +355,8 @@ class GrepRequest(BaseModel):
     level_limit: int = 10
     tags: Optional[List[str]] = None
     include_tags: bool = False
+    before_context: int = Field(default=0, ge=0)
+    after_context: int = Field(default=0, ge=0)
 
 
 class GlobRequest(BaseModel):
@@ -345,6 +373,7 @@ class GlobRequest(BaseModel):
 @router.post("/find")
 async def find(
     request: FindRequest,
+    http_request: Request,
     _ctx: RequestContext = Depends(get_request_context),
 ):
     """Semantic search without session context."""
@@ -372,6 +401,7 @@ async def find(
             filter=effective_filter,
             level=_resolve_levels(request.level) or None,
             image_url=resolved_image_url,
+            events_time_decay_protection=request.events_time_decay_protection,
         ),
     )
     result = execution.result
@@ -380,6 +410,7 @@ async def find(
     if request.read_content:
         result = await _inline_read_content(result, service=service, ctx=_ctx)
     result = _sanitize_floats(result)
+    http_request.state.retrieval_result_count = result.get("total", 0)
     return Response(
         status="ok",
         result=result,
@@ -404,16 +435,19 @@ async def _search_context(
     service: Any,
     ctx: RequestContext,
     request: SearchRequest,
+    http_request: Request,
     effective_filter: Optional[Dict[str, Any]],
     actual_limit: int,
 ):
     """Assemble an injection-ready context block for one request."""
     params = AssembleParams(
         query=request.query,
+        search_type=request.search_type,
         image_url=_resolve_image_url(request.image_url, ctx),
         limit=actual_limit,
         score_threshold=request.score_threshold,
         filter=effective_filter,
+        events_time_decay_protection=request.events_time_decay_protection,
         session_id=request.session_id,
         query_expansion=request.query_expansion,
         max_tokens=request.max_tokens,
@@ -436,6 +470,7 @@ async def _search_context(
     ignored = _context_ignored_fields(request)
     if ignored:
         result.stats["ignored"] = ignored
+    http_request.state.retrieval_result_count = len(result.entries)
     return Response(
         status="ok",
         result=_sanitize_floats(result.to_dict()),
@@ -446,6 +481,7 @@ async def _search_context(
 @router.post("/search")
 async def search(
     request: SearchRequest,
+    http_request: Request,
     _ctx: RequestContext = Depends(get_request_context),
 ):
     """Semantic search with optional session context."""
@@ -464,6 +500,7 @@ async def search(
             service=service,
             ctx=_ctx,
             request=request,
+            http_request=http_request,
             effective_filter=effective_filter,
             actual_limit=actual_limit,
         )
@@ -478,14 +515,19 @@ async def search(
             await session.load()
         return await service.search.search(
             query=request.query,
+            search_type=request.search_type,
             ctx=_ctx,
             target_uri=resolved_target_uri,
             session=session,
             limit=actual_limit,
             score_threshold=request.score_threshold,
             filter=effective_filter,
+            context_types=[
+                ContextType(value) for value in resolve_context_types(request.context_type)
+            ],
             level=_resolve_levels(request.level) or None,
             image_url=resolved_image_url,
+            events_time_decay_protection=request.events_time_decay_protection,
         )
 
     execution = await run_operation(
@@ -499,6 +541,7 @@ async def search(
     if request.read_content:
         result = await _inline_read_content(result, service=service, ctx=_ctx)
     result = _sanitize_floats(result)
+    http_request.state.retrieval_result_count = result.get("total", 0)
     return Response(
         status="ok",
         result=result,
@@ -557,6 +600,8 @@ async def grep(
             level_limit=request.level_limit,
             tags=request.tags,
             include_tags=request.include_tags,
+            before_context=request.before_context,
+            after_context=request.after_context,
         )
     except AGFSNotFoundError:
         raise NotFoundError(resolved_uri, "file")

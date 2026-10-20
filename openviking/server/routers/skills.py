@@ -53,6 +53,7 @@ from openviking_cli.utils import get_logger
 router = APIRouter(prefix="/api/v1/skills", tags=["skills"])
 logger = get_logger(__name__)
 
+_DEFAULT_SKILL_LIST_LIMIT = 1000
 _SKILL_INTEGRITY_MAX_ENTRIES = 512
 _SKILL_INTEGRITY_MAX_FILE_BYTES = 16 * 1024 * 1024
 _SKILL_INTEGRITY_MAX_TOTAL_BYTES = 64 * 1024 * 1024
@@ -68,7 +69,6 @@ class UpdateSkillRequest(BaseModel):
     temp_file_id: Optional[str] = None
     from_source: bool = False
     wait: bool = False
-    timeout: Optional[float] = None
     source_metadata: Optional[Dict[str, Any]] = None
     telemetry: TelemetryRequest = False
     target_uri: Optional[str] = None
@@ -125,7 +125,7 @@ def _agent_skills_root(ctx: RequestContext, target_uri: Optional[str] = None) ->
 
 
 async def _list_skills_from_root(
-    service, ctx: RequestContext, root_uri: str
+    service, ctx: RequestContext, root_uri: str, node_limit: int = _DEFAULT_SKILL_LIST_LIMIT
 ) -> list[Dict[str, Any]]:
     """List skills from a specific root URI.
 
@@ -137,13 +137,14 @@ async def _list_skills_from_root(
     nested directories like ``<skill>/scripts`` out of the listing.
     """
     try:
-        entries = await service.fs.ls(
+        page = await service.fs.ls(
             root_uri,
             ctx=ctx,
             output="agent",
             abs_limit=1024,
-            node_limit=1000,
+            node_limit=node_limit,
         )
+        entries = page.entries
     except NotFoundError:
         return []
 
@@ -321,7 +322,7 @@ async def _list_skill_files(
         child_limit = max(node_limit - len(entries), 0)
         if child_limit <= 0:
             break
-        children = await service.fs.ls(
+        page = await service.fs.ls(
             current_uri,
             ctx=ctx,
             output="agent",
@@ -329,6 +330,7 @@ async def _list_skill_files(
             show_all_hidden=True,
             node_limit=child_limit,
         )
+        children = page.entries
         for entry in children:
             if not isinstance(entry, dict):
                 continue
@@ -555,25 +557,26 @@ async def _restore_skill_privacy(
 
 @router.get("")
 async def list_skills(
-    node_limit: int = 1000,
+    node_limit: int = _DEFAULT_SKILL_LIST_LIMIT,
     target_uri: Optional[str] = None,
     _ctx: RequestContext = Depends(get_request_context),
 ):
-    """List installed agent skills."""
+    """List installed agent skills; ``node_limit`` caps each skill root (0 keeps the default)."""
     service = get_service()
+    limit = node_limit if node_limit > 0 else _DEFAULT_SKILL_LIST_LIMIT
     if target_uri:
         resolved_uri = validate_request_viking_uri(
             resolve_path_variables(target_uri), _ctx, field_name="target_uri"
         )
-        skills = await _list_skills_from_root(service, _ctx, resolved_uri)
+        skills = await _list_skills_from_root(service, _ctx, resolved_uri, limit)
         return Response(
             status="ok", result={"root_uri": resolved_uri, "skills": skills, "total": len(skills)}
         )
     else:
         user_skills = await _list_skills_from_root(
-            service, _ctx, f"{canonical_user_root(_ctx)}/skills"
+            service, _ctx, f"{canonical_user_root(_ctx)}/skills", limit
         )
-        agent_skills = await _list_skills_from_root(service, _ctx, "viking://agent/skills")
+        agent_skills = await _list_skills_from_root(service, _ctx, "viking://agent/skills", limit)
         # Intentionally concatenate without deduplication: when the same skill
         # name exists in both the user-private and the account-shared agent
         # scope, both entries should be visible so the caller can tell them
@@ -630,7 +633,7 @@ async def find_skills(
 
         # Both finds embed the same query text, so wrap the fan-out in the
         # request-scoped cache to reuse the first in-flight embed.
-        with query_embed_cache_scope():
+        async with query_embed_cache_scope():
             user_execution, agent_execution = await asyncio.gather(
                 run_operation(
                     operation="skills.find",
@@ -979,7 +982,6 @@ async def update_skill(
                     data=preparation,
                     ctx=_ctx,
                     wait=request.wait,
-                    timeout=request.timeout,
                     allow_local_path_resolution=False,
                     source_path_hint=source_path_hint,
                     apply_privacy=False,

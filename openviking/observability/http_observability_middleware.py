@@ -385,6 +385,21 @@ def maybe_apply_root_span_error(root_attrs: RootSpanAttributes, exc: Exception) 
         )
 
 
+def scope_route_template(scope: Scope) -> str:
+    """Return the matched route template, prefixed with the path of any mount it sits under.
+
+    Starlette records the innermost route in ``scope["route"]``; for a mounted sub-app
+    (the embedded gateway at ``/gateway``) its template omits the mount path, which
+    ``root_path`` minus the server's own ``app_root_path`` restores.
+    """
+    path = getattr(scope.get("route"), "path", None)
+    if not path:
+        return "/__unmatched__"
+    root_path = scope.get("root_path", "")
+    mount_path = root_path.removeprefix(scope.get("app_root_path", root_path))
+    return f"{mount_path}{path}"
+
+
 def _get_route_template(request: Request) -> str:
     """
     Resolve a shared low-cardinality route template for request observability.
@@ -400,11 +415,7 @@ def _get_route_template(request: Request) -> str:
         has occurred, otherwise "/__unmatched__".
     """
     try:
-        route = request.scope.get("route")
-        path = getattr(route, "path", None)
-        if path:
-            return str(path)
-        return "/__unmatched__"
+        return scope_route_template(request.scope)
     except (TypeError, AttributeError) as e:
         logger.debug("Error getting route template: %s", str(e))
         return "/__unmatched__"
@@ -693,6 +704,7 @@ def apply_http_metrics_finalize(
             request_id=root_attrs.request_id,
             user_id=root_attrs.user_id,
             url_path=root_attrs.url_path,
+            result_count=getattr(request.state, "retrieval_result_count", None),
             error_code=captured_error.code if include_error and captured_error else None,
             error_message=captured_error.message if include_error and captured_error else None,
             error_details=captured_error.details if include_error and captured_error else None,

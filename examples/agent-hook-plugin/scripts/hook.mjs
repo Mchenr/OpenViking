@@ -28,6 +28,7 @@ import {
 import { maybeDetach, readHookStdin } from "../../memory-plugin-shared/lib/async-writer.mjs";
 import { isCaptureEnabled } from "../../memory-plugin-shared/lib/capture-utils.mjs";
 import { HOSTS } from "../hosts/index.mjs";
+import { withRequestBudget } from "./request-budget.mjs";
 
 // ZCode's detached writer re-enters this file with no arguments at all, so what
 // the first run put in the environment is what tells the worker what it is.
@@ -52,7 +53,8 @@ function emit(block) {
   if (emitted) return;
   emitted = true;
   const value = host.envelope(event, block || "");
-  if (value) process.stdout.write(`${JSON.stringify(value)}\n`);
+  if (typeof value === "string") process.stdout.write(`${value}\n`);
+  else if (value) process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
 const normalize = (input) => (host.normalizeInput ? host.normalizeInput(input) : input);
@@ -68,6 +70,7 @@ async function sessionStart(ctx) {
     if (now - Number(state.lastSessionStartAt || 0) < 2000) return "";
     await writeHookState(clientId, ctx.nativeSessionId, { ...state, lastSessionStartAt: now });
     await replayAgentPending(ctx.fetchJSON, log).catch((error) => logError("pending", error));
+    if ((host.profileStage || "session-start") !== "session-start") return "";
     const profile = await buildAgentProfile(ctx.fetchJSON, ctx.cfg, ctx.cwd).catch((error) => {
       logError("profile", error);
       return null;
@@ -89,6 +92,16 @@ async function promptSubmit(ctx) {
       ? state.promptEventId === promptEventId
       : state.promptHash === promptHash && now - Number(state.promptAt || 0) < 500;
     if (duplicateEvent) return "";
+    const parts = [];
+    let profileInjected = Boolean(state.profileInjected);
+    if (host.profileStage === "first-prompt" && !profileInjected) {
+      const profile = await buildAgentProfile(ctx.fetchJSON, ctx.cfg, ctx.cwd).catch((error) => {
+        logError("profile", error);
+        return null;
+      });
+      if (profile) parts.push(contextBlock("session-start", profile));
+      profileInjected = Boolean(profile);
+    }
     const recallBlock = state.promptHash === promptHash && state.recallBlock
       ? state.recallBlock
       : await recallForPrompt(ctx.fetchJSON, ctx.cfg, prompt, ctx.cwd, log, { sessionId: ctx.sessionId })
@@ -96,15 +109,17 @@ async function promptSubmit(ctx) {
           logError("recall", error);
           return null;
         });
+    if (recallBlock) parts.push(recallBlock);
     await writeHookState(clientId, ctx.nativeSessionId, {
       ...state,
       promptHash,
       promptEventId,
       promptAt: now,
       recallBlock,
+      ...(host.profileStage === "first-prompt" ? { profileInjected } : {}),
       ...(host.tracksPendingPrompt ? { pendingPrompt: { prompt, hash: promptHash, at: now } } : {}),
     });
-    return recallBlock || "";
+    return parts.join("\n\n");
   });
 }
 
@@ -138,13 +153,18 @@ async function main() {
     cfg = resolved;
     const payload = normalize(input);
     if (!stageName) return "";
+    const agent = makeAgentFetchJSON(cfg, cwd);
+    const baseFetchJSON = agent.fetchJSON;
     const ctx = {
       cfg,
       cwd,
       input: payload,
       nativeSessionId: resolveNativeSessionId(payload),
       sessionId: deriveAgentSessionId(host.prefix, payload),
-      fetchJSON: makeAgentFetchJSON(cfg, cwd).fetchJSON,
+      fetchJSON: withRequestBudget(baseFetchJSON, host.requestBudgets?.[event], cfg.timeoutMs),
+      // The peer the actor-peer header already carries, stamped into captured
+      // messages because session writes read it from the body only.
+      get peerId() { return agent.effectivePeer.peerId; },
       log,
       logError,
     };

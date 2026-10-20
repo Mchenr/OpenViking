@@ -88,7 +88,7 @@ Concrete examples of skill invocation.
 | tags | List[str] | Tags for categorization |
 | metadata | object | Preserved extensions such as `metadata.vikingbot.requires`; OpenViking does not install these dependencies |
 
-Use hyphenated **`allowed-tools`** in `SKILL.md`; parsed structured data and API summaries use **`allowed_tools`**. Do not substitute the underscore spelling in frontmatter. An omitted declaration and an explicit empty declaration can have different Harness permissions; a summary with `allowed_tools: []` cannot distinguish them. Read the full definition before execution. See [VikingBot Skills](../../../bot/docs/en/concepts/06-skills.md) for instruction and metadata handling.
+Use hyphenated **`allowed-tools`** in `SKILL.md`; parsed structured data and API summaries use **`allowed_tools`**. Do not substitute the underscore spelling in frontmatter. An omitted declaration and an explicit empty declaration can have different Harness permissions; a summary with `allowed_tools: []` cannot distinguish them. Read the full definition before execution. See [VikingBot Skills](https://github.com/volcengine/OpenViking/blob/main/bot/docs/en/concepts/06-skills.md) for instruction and metadata handling.
 
 ### MCP Format Automatic Conversion
 
@@ -161,7 +161,7 @@ Add a skill to the knowledge base.
 
 #### 1. API Implementation Overview
 
-Skills are a special type of resource that define actions or tools agents can perform.
+This endpoint stores Skill instructions and supporting files, then generates summaries and indexes for retrieval. It does not execute the Skill or register tools.
 
 **Processing Flow**:
 1. Receive skill data or uploaded temporary file
@@ -174,6 +174,8 @@ Skills are a special type of resource that define actions or tools agents can pe
 - `sdk/python/openviking_sdk/client.py:AsyncHTTPClient.add_skill` - Python SDK entry point
 - `openviking_cli/client/http.py` - Compatibility import forwarding to the Python SDK
 - `openviking/server/routers/resources.py:add_skill` - HTTP router
+- `openviking/server/mcp_endpoint.py:add_skill` - MCP tool
+- `openviking/server/skill_ingest.py:install_skills` - Install implementation shared by the HTTP router, the MCP tool, and signed skill uploads
 - `openviking/service/resource_service.py:ResourceService.add_skill` - Core service implementation
 - `openviking/server/routers/skills.py` - List, find, read, validate, update, and delete endpoints
 - `crates/ov_cli/src/commands/skills.rs` - CLI Skill command handlers
@@ -187,7 +189,6 @@ Skills are a special type of resource that define actions or tools agents can pe
 | data | Any | No | - | Inline SKILL.md, structured/MCP data, or Git URL; choose this or `temp_file_id` |
 | temp_file_id | str | No | - | Temporary upload file ID (from `temp_upload`); choose this or `data` |
 | wait | bool | No | False | Wait for skill processing to complete |
-| timeout | float | No | None | Timeout in seconds, only effective when `wait=true` |
 | telemetry | TelemetryRequest | No | False | Whether to return telemetry data |
 | target_uri | str | No | Target resolution order | Skills root, such as `viking://~/skills` or `viking://agent/skills` |
 | skills | List[str] | No | `[]` | Select directory names from a directory/Git collection; empty or `["*"]` selects all |
@@ -206,6 +207,7 @@ Supply at least one of `data` or `temp_file_id`. The current server gives upload
     - First call `POST /api/v1/resources/temp_upload` to upload a local `SKILL.md` or directory ZIP, then call `POST /api/v1/skills` with `temp_file_id`
   - `temp_upload` defaults to local temporary storage; pass `upload_mode=shared` only when you explicitly need distributed shared temporary uploads. Python HTTP clients can set `upload.mode = "shared"` in `ovcli.conf`; the Rust `ov` CLI instead uses `OPENVIKING_UPLOAD_MODE=shared`.
   - `POST /api/v1/skills` does not accept direct host filesystem paths in `data`.
+  - MCP clients use the `add_skill` tool: `data` takes SKILL.md text, and `path` takes a Git URL or a local path. For a local path the tool returns a one-time signed `temp_upload` URL; after the client POSTs the SKILL.md or ZIP there, the server installs it with the token-bound `target_uri`, `skills`, and `list_only`, and the upload response carries the install result.
 
 - **Targeting**:
   - Add requests use `target_uri` for the skills root; `to`, `parent`, and `root_uri` are not HTTP request fields. CLI `-p/--parent-auto-create` maps to `target_uri`.
@@ -225,7 +227,7 @@ Local `.json` files are not automatically decoded into structured Skills. Parse 
 
 Single-Skill imports return a `task_id` by default. Query the [Task API](17-tasks.md) and search after the task reaches `completed`. With `wait=true`, the call waits for queue processing and returns `queue_status`. Multiple imports return an `installed` array with independent task information per result; the batch is not atomic. `list_only=true` returns source `skills` and `total` without creating import tasks.
 
-HTTP fields and SDK parameters do not have identical names or nesting. Python `add_skill(data, wait=False, timeout=None, options=None)` / `update_skill(skill_name, data, ...)` take `target_uri` and `telemetry` inside `options`. Put fields such as `skills`, `list_only`, `source_metadata` (add), and `from_source` (update) in `options["extra"]`. TypeScript uses `targetUri` and `extra`; Go uses `TargetURI` and `Extra`. TypeScript local path uploads require Node.js.
+HTTP fields and SDK parameters do not have identical names or nesting. Python `add_skill(data, wait=False, options=None)` / `update_skill(skill_name, data, ...)` take `target_uri` and `telemetry` inside `options`. Put fields such as `skills`, `list_only`, `source_metadata` (add), and `from_source` (update) in `options["extra"]`. TypeScript uses `targetUri` and `extra`; Go uses `TargetURI` and `Extra`. TypeScript local path uploads require Node.js.
 
 ```python
 # Preview a local collection without writing to OpenViking
@@ -408,7 +410,7 @@ ov skills add ./skills/code-runner/ -p viking://agent/skills --wait
 ov task status TASK_ID
 
 # Use JSON output format
-ov add-skill ./skills/my-skill/ -o json
+ov -o json add-skill ./skills/my-skill/
 ```
 
 **Response Examples**
@@ -443,12 +445,15 @@ task_id         uuid-xxx
 **CLI response (JSON format, using -o json)**:
 ```json
 {
-  "status": "success",
-  "root_uri": "viking://user/alice/skills/my-skill",
-  "uri": "viking://user/alice/skills/my-skill",
-  "name": "my-skill",
-  "auxiliary_files": 2,
-  "task_id": "uuid-xxx"
+  "ok": true,
+  "result": {
+    "status": "success",
+    "root_uri": "viking://user/alice/skills/my-skill",
+    "uri": "viking://user/alice/skills/my-skill",
+    "name": "my-skill",
+    "auxiliary_files": 2,
+    "task_id": "uuid-xxx"
+  }
 }
 ```
 
@@ -482,7 +487,7 @@ If skill parsing or processing fails synchronously, raw HTTP returns the standar
 
 The Python HTTP SDK raises the corresponding mapped exception for this response.
 
-Error codes depend on the failure stage: invalid names/targets use `INVALID_ARGUMENT` / `INVALID_URI`, missing Skills use `NOT_FOUND`, oversized integrity manifests use `RESOURCE_EXHAUSTED`, and wait timeouts use `DEADLINE_EXCEEDED`. Success with `wait=false` only confirms the synchronous import stage; inspect task status for background failures. Standard responses may include optional `telemetry` / `profile`, but have no generic `time` field. SDKs normally return the `result` object directly.
+Error codes depend on the failure stage: invalid names/targets use `INVALID_ARGUMENT` / `INVALID_URI`, missing Skills use `NOT_FOUND`, oversized integrity manifests use `RESOURCE_EXHAUSTED`. Success with `wait=false` only confirms the synchronous import stage; inspect task status for background failures. Standard responses may include optional `telemetry` / `profile`, but have no generic `time` field. SDKs normally return the `result` object directly.
 
 ## Skill Management Operations
 
@@ -514,7 +519,10 @@ console.log(await client.listSkills());
 
 ```go
 skills, err := client.ListSkills(ctx, nil)
-_ = skills
+if err != nil {
+    return err
+}
+fmt.Println(skills)
 ```
 
 **HTTP API**
@@ -564,7 +572,10 @@ skill, err := client.GetSkill(ctx, "search-web", &openviking.GetSkillOptions{
     IncludeContent: openviking.Bool(true),
     IncludeFiles:   openviking.Bool(true),
 })
-_ = skill
+if err != nil {
+    return err
+}
+fmt.Println(skill)
 ```
 
 **HTTP API**
@@ -604,7 +615,7 @@ The HTTP equivalent is `GET /api/v1/skills/search-web?include_content=true&inclu
 
 The manifest includes `SKILL.md`, summaries, and auxiliary files/directories, but excludes `.source.json`. Integrity limits are **512 entries (including directories), 16 MiB per file, and 64 MiB total file bytes**, with read concurrency 8. Exceeding a limit returns `RESOURCE_EXHAUSTED`. Content, manifest, and revision are obtained under one tree lock, but later downloads can encounter updates; consumers should verify file hashes and recheck revision.
 
-Search and `get_skill` return content and manifests without executing scripts or installing files in an Agent sandbox. A Harness can read text remotely and download resources when a tool requires local paths. See [VikingBot Skills](../../../bot/docs/en/concepts/06-skills.md) for the complete consumer workflow.
+Search and `get_skill` return content and manifests without executing scripts or installing files in an Agent sandbox. A Harness can read text remotely and download resources when a tool requires local paths. See [VikingBot Skills](https://github.com/volcengine/OpenViking/blob/main/bot/docs/en/concepts/06-skills.md) for the complete consumer workflow. MCP clients reach the same package-level behavior through the `find` tool with `context_type="skill"`; see [MCP Integration](../guides/06-mcp-integration.md).
 
 ### Search Skills
 
@@ -621,7 +632,7 @@ Search and `get_skill` return content and manifests without executing scripts or
 
 Package hits are grouped by their full Skill root URI, ranked by their highest final score, then limited to `limit` Skills. Same-named Skills in different scopes remain distinct. `total` is the returned array length, not a count of all possible matches.
 
-Each Skill is represented by its highest-scoring package hit. The existing `uri`, `level`, `score`, and `abstract` fields come directly from that hit, without additional response fields. Package grouping and pagination apply only to dedicated `skills/find`; general `find/search` continues to return individual hits.
+Each Skill is represented by its highest-scoring package hit. The existing `uri`, `level`, `score`, and `abstract` fields come directly from that hit, without additional response fields. Package grouping and pagination apply to the dedicated `skills/find` endpoint and to the MCP `find` tool called with `context_type="skill"` alone; REST `find` / `search` continue to return individual hits. MCP `search` retrieves individual hits too, and only collapses them per package when rendering its answer.
 
 | Response field | Meaning |
 | --- | --- |
@@ -631,11 +642,11 @@ Each Skill is represented by its highest-scoring package hit. The existing `uri`
 | `name` / `description` / `tags` / `allowed_tools` | Metadata read separately from the Skill root by the dedicated `skills/find` endpoint |
 | `root_uri` / `skill_md_uri` | The Skill root and main `SKILL.md` addresses returned by the dedicated `skills/find` endpoint |
 
-The dedicated `skills/find` endpoint now returns the actual hit URI instead of replacing it with the package root. List and get-by-name responses are unchanged. `level=[2]` restricts matching to files and returns `level=2` with the URI of the highest-scoring file in each package.
+The dedicated `skills/find` endpoint now returns the actual hit URI instead of replacing it with the package root; the MCP `find` tool differs and rewrites every Skill hit to `<package root>/SKILL.md`. List and get-by-name responses are unchanged. `level=[2]` restricts matching to files and returns `level=2` with the URI of the highest-scoring file in each package.
 
-General search with `read_content=true` continues to read the returned URI. The dedicated `skills/find` endpoint does not accept this option.
+General search with `read_content=true` continues to read the returned URI — for MCP `find` with `context_type="skill"` that URI is the package's `SKILL.md`, not the file that matched. The dedicated `skills/find` endpoint does not accept this option.
 
-The URI rules above apply to semantic search. Filter-only general `find` retains the stored record URI and returns `score=0`, without adding summary-file suffixes for L0 or L1.
+The URI rules above apply to semantic search. A filter-only general `find` retains the stored record URI and returns `score=0`, without adding summary-file suffixes for L0 or L1; MCP `find` keeps such a query on that generic path, since package retrieval requires query text, but still rewrites each skill hit to its `SKILL.md`.
 
 Scope, level, and permission filters apply before grouping; the Skill root must also be accessible.
 
@@ -660,7 +671,10 @@ console.log(await client.findSkills("database migration"));
 results, err := client.FindSkills(ctx, "search the internet", &openviking.FindSkillsOptions{
     Limit: 5,
 })
-_ = results
+if err != nil {
+    return err
+}
+fmt.Println(results)
 ```
 
 **HTTP API**
@@ -689,12 +703,12 @@ Missing names/descriptions and invalid YAML produce errors. Directory/name misma
 | `from_source` | `false` | Refresh from recorded Git source; cannot be combined with data/temp_file_id |
 | `target_uri` | Unspecified | Skills root to try first; see read resolution fallback |
 | `source_metadata` | Generated automatically | Updated source tracking |
-| `wait` / `timeout` | `false` / `null` | Wait for background processing and timeout in seconds |
+| `wait` | `false` | Wait for background processing |
 | `telemetry` | `false` | Telemetry configuration |
 
 Supply new content/an upload, or set `from_source=true`. The new name must match `skill_name` in the URL; update is neither rename nor a partial patch. The server parses and checks the new package before backing up and replacing the old one, and attempts restoration on synchronous failure. Include all auxiliary files that should remain in the replacement package.
 
-Background processing starts after the update's files, privacy configuration, and task setup are ready. When an update needs restoration, including a `wait=true` timeout, it cancels that update's summary and indexing work, waits for started writes to exit, and restores the original files, index, and privacy configuration. Restoration failures are reported. The timeout response may arrive after `timeout` while cancellation settles; it does not wait for the entire package to finish processing. Background failures after a successful `wait=false` response do not trigger restoration. A timeout when adding a new Skill still only ends the wait.
+Background processing starts after the update's files, privacy configuration, and task setup are ready. When an update fails or is cancelled while waiting, it cancels that update's summary and indexing work, waits for started writes to exit, and restores the original files, index, and privacy configuration. Restoration failures are reported. Background failures after a successful `wait=false` response do not trigger restoration.
 
 **Python SDK**
 
@@ -724,8 +738,15 @@ validated, err := client.ValidateSkill(ctx, map[string]any{
     "name":        "search-web",
     "description": "...",
 }, nil)
+if err != nil {
+    return err
+}
+fmt.Println(validated)
 updated, err := client.UpdateSkill(ctx, "search-web", "./skills/search-web", nil)
-_, _ = validated, updated
+if err != nil {
+    return err
+}
+fmt.Println(updated)
 ```
 
 **HTTP API**
@@ -788,7 +809,10 @@ await client.deleteSkill("my-skill");
 
 ```go
 deleted, err := client.DeleteSkill(ctx, "old-skill")
-_ = deleted
+if err != nil {
+    return err
+}
+fmt.Println(deleted)
 ```
 
 **HTTP API**
@@ -815,7 +839,7 @@ Without names, `ov skills update` attempts all installed Skills and reports unsu
 
 ### Skill Management Responses
 
-List and search return a `skills` array and `total`. Without `target_uri`, `root_uris` identifies the private user and shared Agent roots; with a target, the response contains a single `root_uri`.
+List and search return a `skills` array and `total`. Without `target_uri`, `root_uris` identifies the private user and shared Agent roots; with a target, the response contains a single `root_uri`. The following search response uses an L0 hit. A list response uses the package URI and does not include search scores.
 
 ```json
 {
@@ -829,7 +853,7 @@ List and search return a `skills` array and `total`. Without `target_uri`, `root
       {
         "type": "skill",
         "name": "search-web",
-        "uri": "viking://user/default/skills/search-web",
+        "uri": "viking://user/default/skills/search-web/.abstract.md",
         "root_uri": "viking://user/default/skills/search-web",
         "skill_md_uri": "viking://user/default/skills/search-web/SKILL.md",
         "description": "Search the web for current information",
@@ -909,14 +933,9 @@ skill = {
 }
 ```
 
-### Comprehensive Content
+### Execution Conditions and Expected Results
 
-Include in your skill content:
-
-- Clear parameter descriptions with types
-- When to use the skill
-- Concrete examples
-- Edge cases and limitations
+State when the Skill applies, the tools and dependencies it needs, its inputs, and the expected output. Give one concrete example and a way to check the result. Explain what the Agent should do when a dependency is missing or a step fails. OpenViking stores these instructions; the consuming Harness determines which tools can actually run.
 
 ### Consistent Naming
 
@@ -933,4 +952,4 @@ Use kebab-case for skill names:
 - [Context Types](../concepts/02-context-types.md) - Skill concept
 - [Retrieval](06-retrieval.md) - Finding skills
 - [Sessions](05-sessions.md) - Tracking skill usage
-- [VikingBot Skills](../../../bot/docs/en/concepts/06-skills.md) - Local/remote activation, metadata, and execution
+- [VikingBot Skills](https://github.com/volcengine/OpenViking/blob/main/bot/docs/en/concepts/06-skills.md) - Local/remote activation, metadata, and execution
